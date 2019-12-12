@@ -176,13 +176,6 @@ dynamicMods =
 dynamicColors = labels2colors(dynamicMods)
 table(dynamicColors)
 
-# Plot the dendrogram and colors underneath
-# sizeGrWindow(8,6)
-# plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
-#                     dendroLabels = FALSE, hang = 0.03,
-#                     addGuide = TRUE, guideHang = 0.05,
-#                     main = "Gene dendrogram and module colors")
-
 # Calculate eigengenes
 MEList = moduleEigengenes(datExpr0, colors = dynamicColors)
 MEs = MEList$eigengenes
@@ -190,14 +183,8 @@ MEs = MEList$eigengenes
 MEDiss = 1-cor(MEs);
 # Cluster module eigengenes
 METree = hclust(as.dist(MEDiss), method = "average");
-# Plot the result
-# sizeGrWindow(7, 6)
-# plot(METree, main = "Clustering of module eigengenes",
-#      xlab = "", sub = "")
 
 MEDissThres = 0.25
-# Plot the cut line into the dendrogram
-# abline(h=MEDissThres, col = "red")
 # Call an automatic merging function
 merge = mergeCloseModules(datExpr0, dynamicColors, cutHeight = MEDissThres, verbose = 3)
 # The merged module colors
@@ -242,8 +229,8 @@ keep.genes<-alties%>%
   mutate(gene=gsub("_","",gene))
 
 cyt = exportNetworkToCytoscape(TOM,
-edgeFile = "0.10_net_redo.txt",
-nodeFile = "0.10_nodes_redo.txt",
+edgeFile = "data_out/0.10_net_redo.txt",
+nodeFile = "data_out/0.10_nodes_redo.txt",
 weighted = T,
 threshold = 0.10,
 nodeNames = alties$gene,
@@ -692,93 +679,6 @@ save_plot("Figures/Fig3.pdf",
           base_height = 7.5,base_aspect_ratio=1.3)
 ```
 
-## Pie Chart
-```{r pie_chart}
-###Notes
-# darkslatelue=rRNA
-# salmon=tRNA
-# grey60=amino acid synthesis
-# midnightblue=ribosomal proteins
-# mediumpurple3=biofilm
-# skyblue3=virulence
-# lightyellow=T6SS
-pizza_totes <- node_df %>%
-  group_by(dynamicColors)%>%
-  summarise(ptotal=n())%>%
-  mutate(x_pos=c(0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3,4,
-                 0,1,2,3),
-         y_pos=c(rep(9,5),
-                 rep(8,5),
-                 rep(7,5),
-                 rep(6,5),
-                 rep(5,5),
-                 rep(4,5),
-                 rep(3,5),
-                 rep(2,5),
-                 rep(1,5),
-                 rep(0,4)),
-         bettername=dynamicColors)
-
-pizza<-node_df %>%
-  group_by(dynamicColors,hypno2,hypno) %>%
-  summarise(nsub=n()) %>%
-  ungroup%>%
-  full_join(pizza_totes)%>%
-mutate(psub=nsub/ptotal)%>%
-  mutate(hypno2=factor(hypno2,levels=c("Known","Important\nUnknown","Unknown")),
-         genes=gsub("Unknown|Important\nUnknown","",hypno2),
-         genes=gsub("Known","genes",genes),
-         ptoes=case_when(hypno2=="Known" ~
-                           as.character(paste0(ptotal,
-                                               " genes")),
-                          hypno2!="Known" ~ "")) %>%
-  mutate(end_angle=2*pi*nsub/ptotal,
-         #end_angle=end_angle+start_angle,
-         start_angle=lag(end_angle, default = 0),
-         mid_angle = 0.5*(start_angle + end_angle),
-         hjust = ifelse(mid_angle>pi, 1, 0),
-         vjust = ifelse(mid_angle<pi/2 | 
-                          mid_angle>3*pi/2, 0, 1))
-setorder(pizza,-hypno2)
-
-pie_chart<-ggplot(data=pizza)+
-  geom_arc_bar(aes(x0=x_pos,y0=y_pos,r0=0,r=0.35,amount=nsub,fill=hypno2,colour=hypno2),stat="pie")+
-  geom_text(aes(label=bettername,x=x_pos,y=y_pos+0.55),size=5)+
-  geom_text(aes(label=ptoes,x=x_pos,y=y_pos+0.435))+
-  scale_fill_manual(values=c("skyblue2",
-                             "#DE2D26",
-                             "#FEE0D2",
-                             "black"),
-              labels=c("Known","Unknown Important","Unknown Other"),
-              name="Function")+
-  scale_colour_manual(values=c("skyblue2",
-                             "#DE2D26",
-                             "#FEE0D2",
-                             "black"),
-              labels=c("Known","Unknown Important","Unknown Other"),
-              name="Function")+
-  theme(legend.title=element_blank(),
-        legend.justification = "center",
-        axis.line = element_blank(),
-        axis.title = element_blank(),
-        axis.ticks = element_blank(),
-        axis.text = element_blank(),
-        legend.position=c(0.875,0.17),
-        legend.key = element_rect(color = NA, fill = NA),
-        legend.key.size = unit(1, "cm"))
-save_plot("Figures/pie_chart.pdf",pie_chart,base_height=7,base_aspect_ratio = 1.2)
-
-```
-
-
 # Figure 2
 ```{r Simple_Graphs}
 # darkslatelue=rRNA
@@ -865,17 +765,6 @@ legz <- ggraph(facetted%>%filter(!duplicated(annotation) | !duplicated(hypno2)),
   geom_node_point(aes(shape=hypno2,fill=as.factor(annotation),colour=as.factor(annotation)),size=sss)+
   geom_node_text(aes(label=facetted_labs),size=2.75,repel=T)+
   scale_shape_manual(name="Function",values=c(23,21,22))+
-  # facet_nodes(~factor(dynamicColors,
-  #                      levels=c(
-  #                               "salmon",
-  #                               "midnightblue",
-  #                               "grey60",
-  #                               "mediumpurple3"),
-  #                     labels = c(
-  #                                "tRNA",
-  #                                "Ribosomal Proteins",
-  #                                "Amino Acid Synthesis",
-  #                                "Biofilm")),scales="free")+
   scale_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none')+
   scale_fill_manual(name="Predicted\nPathway",values=realpal)+
   guides(fill = guide_legend(override.aes=list(shape=21)))+
