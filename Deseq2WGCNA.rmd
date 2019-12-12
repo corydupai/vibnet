@@ -1,0 +1,999 @@
+```{r}
+library(data.table)
+library(WGCNA)
+library(ggraph)
+library(grid)
+library(gridExtra)
+library(tidygraph)
+library(tidyverse)
+library(ggrepel)
+library(cowplot)
+library(ggfortify)
+library(igraph)
+library(ungeviz)
+library(colorspace)
+library(RColorBrewer)
+library(VennDiagram)
+library(ggforce)
+
+```
+
+```{r}
+cbbPalette <- c("#56B4E9","#0072B2","#D55E00","grey90","#009E73","grey70","#E69F00","#CC79A7","grey50","grey30","black")
+
+realpal <- c(
+             "Metabolism"="#E69F00", 
+             "Ribosome"="#009E73",
+             "RNA/DNA"="grey65",
+             "rRNA"="#D55E00",
+             "Amino Acid Synthesis"="#D55E00",
+             "Replication"="#56B4E9",
+             "tRNA" = "#56B4E9",
+             "Secretion System"="#F0E442",
+             "T6SS"="#F0E442",
+             "Biofilm"="#0072B2", 
+             "Virulence"="#CC79A7",
+             "Unclear"="white",
+             " ESS  "="#DE2D26", 
+             " Semi  "="#FC9272", 
+             " No Data  "="grey50",
+             " Non Ess"="#FEE0D2",
+             "Localization  "="#7D87B9",
+             "Bio Process  "="#BEC1D4",
+             "Function  "="#E2E2E2",
+             "KEGG  "="red",
+             "black"="black",
+             "grey75"="grey75",
+             "randos"="grey10",
+             "Positive"="blue",
+             "Negative"="red")
+
+pieslices<-c("Network Known"= "#8C94BF",
+             "Known"="skyblue2",
+             "Network Unknown"= "plum2",
+             "Unknown"= "orangered3",
+             "Network"= "#8C94BF",
+             "Non-network"= "plum2")
+realdark<-darken(realpal,amount=0.5)
+names(realdark)<-names(realpal)
+```
+
+
+## Heatmap function
+```{r heatmap_function, echo=FALSE}
+heat_func<-function(qqq){
+  printz<-ggplot(data = qqq, aes(x = sample, y=vc_names, fill=real_some)) + 
+    geom_tile()+
+
+    scale_fill_distiller(
+      palette = "Reds",
+      direction=+1,
+      name="Normalized\nReads"
+    )+
+    xlab("Condition")+
+    ylab("Gene")+
+    theme_cowplot(12)+
+    theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.line = element_blank()
+    )
+  return(printz)
+}
+```
+
+
+```{r load data}
+
+count.out<-
+  unique(fread("data_in/out_dt_redo.csv"
+               )[,vc_names:=gsub("\\|.*$","",vc_names)
+                ][!duplicated(vc_names)])
+
+positions <- 
+  unique(fread('genome_info/positions.csv'
+               )[Type%in%c("CDS","rRNA","tRNA","fCDS")])
+count.out<-count.out[vc_names%in%positions[,gene]]
+
+genes.in <- 
+  fread("genome_info/full_genes.txt")[,vc_names:=gsub(".*EnsemblGenome=|\\|UniProtKB.*|_","",V1)
+                                    ][,Uniprot:=gsub(".*UniProtKB=","",V1)
+                                    ][,Mapped:=V1
+                                    ][,c("Mapped","vc_names","Uniprot")]
+
+families.in<-
+  fread("genome_info/family_list.txt")[,GO:=Molecular_function
+                                     ][,GO_num:=gsub("^.*?\\(GO:","GO:",GO)
+                                     ][,GO_num:=gsub("\\);.*?\\(GO:","GO:",GO_num)
+                                     ][,GO_num:=gsub(";|\\)","",GO_num)
+                                     ][,GO_num:=gsub("GO:",";GO:",GO_num)
+                                     ][,GO_num:=gsub("^;GO:","GO:",GO_num)
+                                     ][,GO:=gsub("\\(.*?\\);|;;|;;;",";",GO)
+                                     ][,GO:=gsub("^;|;$|;;$","",GO)
+                                     ][,GO:=gsub("\\(GO.*\\)$","",GO)
+
+                                     ][,c("Mapped","Family_name","Genes","GO","GO_num")]
+
+genes.in<-merge(genes.in,families.in,all.x=TRUE,by="Mapped")[,!c("Mapped")]
+
+extra<-colnames(genes.in)
+
+microarrays<-merge(fread("data_in/rpos_data.csv"),fread("data_in/hapr_data.csv"),all=T)
+#Load GO and gene label info from David
+
+#manual annotation file
+notes<-fread("data_in/annotations4figs.csv",header=T)[,name:=gsub("VC_","VC",name)][,c("name","annotation")]
+
+#TN-seq data (work on working in)
+mek.tn<-fread("data_in/FC_data_in_host_Mek.csv"
+              )[,name:=Gene_ID
+               ][,log2fc:=log2(FC_OI)
+               ][,mek_labs:="NE"
+               ][log2fc<=(-1),
+                 mek_labs:="S"
+               ][log2fc<=(-3),
+                 mek_labs:="E"
+               ][,c("name",
+                      "log2fc",
+                      "P_Value",
+                      "mek_labs")]
+
+#HMM tnseq data
+HMM.tn<-fread("genome_info/tnseq_HMM.csv")
+
+David.in<-merge(fread("genome_info/David.tsv",
+                         sep ="\t",sep2="\t",fill=TRUE)[,name:=ID],
+                   fread("genome_info/fullnames.csv"),by.x="name",by.y="gene",all=T)
+```
+
+
+```{r matrices}
+datExpr0 = as.data.frame(t(count.out[,!c("vc_names")]))
+names(datExpr0) = count.out[,vc_names]
+rownames(datExpr0) = names(count.out[,!c("vc_names")])
+adjacency = adjacency(datExpr0,type="unsigned", power = 6)
+TOM = TOMsimilarity(adjacency)
+dissTOM = 1-TOM
+```
+
+
+```{r clust_and_colors}
+geneTree = hclust(
+  as.dist(dissTOM), 
+  method="mcquitty"
+  )
+
+minModuleSize = 30;
+
+# Module identification using dynamic tree cut:
+dynamicMods = 
+  cutreeDynamic(dendro = geneTree, 
+                distM = dissTOM,
+                deepSplit = 2, pamRespectsDendro = FALSE,
+                minClusterSize = minModuleSize)
+
+# Convert numeric lables into colors
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+
+# Plot the dendrogram and colors underneath
+# sizeGrWindow(8,6)
+# plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+#                     dendroLabels = FALSE, hang = 0.03,
+#                     addGuide = TRUE, guideHang = 0.05,
+#                     main = "Gene dendrogram and module colors")
+
+# Calculate eigengenes
+MEList = moduleEigengenes(datExpr0, colors = dynamicColors)
+MEs = MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = "average");
+# Plot the result
+# sizeGrWindow(7, 6)
+# plot(METree, main = "Clustering of module eigengenes",
+#      xlab = "", sub = "")
+
+MEDissThres = 0.25
+# Plot the cut line into the dendrogram
+# abline(h=MEDissThres, col = "red")
+# Call an automatic merging function
+merge = mergeCloseModules(datExpr0, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+# The merged module colors
+mergedColors = merge$colors;
+# Eigengenes of the new merged modules:
+mergedMEs = merge$newMEs
+
+# Rename to moduleColors
+# moduleColors = mergedColors
+moduleColors = dynamicColors
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1;
+MEs = mergedMEs
+table(mergedColors)
+
+```
+
+```{r cytoscape}
+sign.it<-cor(datExpr0)
+sign.it[sign.it<0]<-(-1)
+sign.it[sign.it>0]<-(1)
+TOM <- TOM*sign.it
+
+alties<-tibble(gene=colnames(adjacency)) %>%
+  left_join(positions[,c("gene","gene_ID")])%>%
+  mutate(gene=gsub("VC","VC",gene))%>%
+  mutate(gene_ID=case_when(gene_ID==""~gene,
+                                           gene_ID!=""~gene_ID))%>%
+  cbind(dynamicColors)%>%
+  cbind(mergedColors)
+
+fwrite(alties,"genome_info/fullnames.csv")
+
+datExpr1 = as.data.frame(count.out[,!c("vc_names")])
+names(datExpr1) = names(count.out[,!c("vc_names")])
+rownames(datExpr1) = alties[,"gene"]
+full_genes<-alties[,"gene"]
+
+keep.genes<-alties%>%
+  filter(dynamicColors%in%c("skyblue3"))%>%
+  mutate(gene=gsub("_","",gene))
+
+cyt = exportNetworkToCytoscape(TOM,
+edgeFile = "0.10_net_redo.txt",
+nodeFile = "0.10_nodes_redo.txt",
+weighted = T,
+threshold = 0.10,
+nodeNames = alties$gene,
+altNodeNames = alties$gene_ID,
+nodeAttr = alties$dynamicColors)
+```
+
+#load go terms
+```{r}
+
+
+illustrate=c("VCA1024",
+             #this is for translation2
+             "VC0873",
+             "VC0872",
+             "VC0871",
+             "VC0047",
+             "VCA0295",
+             #this is the thiamine one
+             "VC0016",
+             "VC2387"
+             )
+
+
+
+weird_genes=c("VC2655",
+              "VC0030",
+              "VC0062",
+              "VC0803",
+              "VC1145",
+              "VC1147",
+              "VC1184",
+              "VC1597",
+              "VC1825",
+              "VC1967",
+              "VC2445",
+              "VC2516",
+              "VCA0035",
+              "VCA0049",
+              "VCA0056",
+              "VCA0059",
+              "VCA0061",
+              "VCA0064",
+              "VCA0065",
+              "VCA0068",
+              "VCA0070",
+              "VCA0071",
+              "VCA0075",
+              "VCA0080",
+              "VCA0083",
+              "VCA0088",
+              "VCA0098",
+              "VCA0099",
+              "VCA0102",
+              "VCA0103",
+              "VCA0105",
+              "VCA0109",
+              "VCA0113",
+              "VCA0114",
+              "VCA0115",
+              "VCA0120",
+              "VCA0222",
+              "VCA0241",
+              "VCA0249",
+              "VCA0250",
+              "VCA1101",
+              "VC1820"
+              )
+unknown_surprises<-c("VCA0118")
+
+#make real names from lazy names
+named_subs<-list("big ball"="sub1",
+                 "DNA_binding"="sub2",
+                 "ribosomal"="sub3",
+                 "DNA_&_membrane"="sub4",
+                 "VPI1"="sub6",
+                 "thiamine_&_aa"="sub5",
+                 #"LPS_synth"="sub7",
+                 "VPI1"="sub7",
+                 "translation2"="sub8",
+                 "phosphorylation"="sub9",
+                 "signal_receptor"="sub10",
+                 "metal ions"="sub11",
+                 "anaerobic respiration"="sub12",
+                 "transferase"="sub13",
+                 "signaling"="sub14",
+                 "sub15"="sub15",
+                 "sub16"="sub16",
+                 "sub17"="sub17",
+                 "extras"="sub18"
+                 )
+
+real_names<-list("Myriad"="sub1",
+                 "Metal Ion"="sub2",
+                 "Ribosomal"="sub3",
+                      "tRNA"="sub4",
+                 "Virulence"="sub5",
+                 "Metabolism"="sub6",
+                 "Virulence"="sub7",
+                 "Gene Transfer"="sub8",
+                 "T6SS"="sub9","rRNA"="sub10",
+                 "Motility"="sub11",
+                 "Anaerobic"="sub12",
+                 "transferase"="sub13",
+                 "signaling"="sub14",
+                 "sub15"="sub15",
+                 "sub16"="sub16",
+                 "sub17"="sub17",
+                 "extras"="sub18")
+
+named_simp<-names(named_subs)
+names(named_simp)<-paste0("Network",c(1:6,5,7:17))
+real_names<-named_simp
+names(real_names)<-list("Myriad",
+                 "Metal Ion",
+                 "Ribosomal",
+                      "tRNA",
+                 "Virulence",
+                 "Metabolism",
+                 "Virulence",
+                 "Gene Transfer",
+                 "T6SS",
+                 "rRNA",
+                 "Motility",
+                 "Anaerobic",
+                 "transferase",
+                 "signaling",
+                 "sub15",
+                 "sub16",
+                 "sub17",
+                 "extras")
+
+```
+
+
+```{r}
+
+microarrays<-merge(microarrays,fread("data_in/toxr_data.csv"),all=T
+                   )[,log2_toxT:=log2(log2_toxT)
+                   ][,log2_toxRS:=log2(log2_toxR)
+                   ][,log2_tcpPH:=log2(log2_tcpPH)
+                   ][,!c("log2_toxR","SAM")]%>%as_tibble()%>%unique()
+
+
+
+#get better gene symbols
+David.in[OFFICIAL_GENE_SYMBOL!=""&
+              !(is.na(OFFICIAL_GENE_SYMBOL)),
+            gene_ID:=gsub(",","",OFFICIAL_GENE_SYMBOL)
+          ][gene_ID==name,gene_ID:=Gene_Name]
+#process GO terms so you can use them later (mad regex here)
+David.in<-David.in[,GO_M:=GOTERM_MF_DIRECT
+          ][,GO_M_num:=gsub("~.*?,GO:",",GO:",GO_M)
+          ][,GO_M_num:=gsub("~.*?,$","",GO_M_num)
+          ][,GO_M:=gsub(",GO:.*?~|GO:.*?~",";",GO_M)
+          ][,GO_M:=gsub("^;|,$","",GO_M)
+          #Biological Process
+          ][,GO_B:=GOTERM_BP_DIRECT
+          ][,GO_B_num:=gsub("~.*?,GO:",",GO:",GO_B)
+          ][,GO_B_num:=gsub("~.*?,$","",GO_B_num)
+          ][,GO_B:=gsub(",GO:.*?~|GO:.*?~",";",GO_B)
+          ][,GO_B:=gsub("^;|,$","",GO_B)
+          #cellular localization
+          ][,GO_C:=GOTERM_CC_DIRECT
+          ][,GO_C_num:=gsub("~.*?,GO:",",GO:",GO_C)
+          ][,GO_C_num:=gsub("~.*?,$","",GO_C_num)
+          ][,GO_C:=gsub(",GO:.*?~|GO:.*?~",";",GO_C)
+          ][,GO_C:=gsub("^;|,$","",GO_C)
+          ][,KEGG_PATHWAY:=gsub("vch.*?:|,$","",KEGG_PATHWAY)
+          ][,c("name","Gene_Name","KEGG_PATHWAY",
+               "OFFICIAL_GENE_SYMBOL",
+               "gene_ID","GO_M","GO_B","GO_C")
+          ]
+#label genes based on knowledge, shorten long names
+David.in<-David.in%>%
+  mutate(
+    des2 = case_when(
+      grepl("hypothetical|Unknown|pseudo", gene_ID) ~ name,
+      is.na(gene_ID) ~ name,
+      !(grepl("hypothetical|Unknown|pseudo", gene_ID)) ~ gene_ID
+    ),
+    des2 = gsub("VCA1059", "putative pseudouridine methyltransferase",des2)
+  ) %>%
+  mutate(
+    hypno = case_when(
+    name%in%weird_genes~"Known",
+    grepl("VC|VIBCH",
+          des2) ~ "Unknown",
+    name%in%unknown_surprises~"Unknown",
+    !(grepl("VC|VIBCH",
+            des2)) ~ "Known")) %>%
+  mutate(des2=gsub("\\(VC.*\\)","",des2)) %>%
+  mutate(des2=gsub("methyl-accepting chemotaxis protein",
+                   "MACP",des2),
+         des2=gsub("5-carboxymethyl-2-hydroxymuconate delta-isomerase",
+                   "hpcD",des2),
+         des2=gsub("pyoverdine biosynthesis protein |flagellar hook-length control protein |fimbrial assembly protein | protein",
+                   "",des2),
+         des2=gsub("fimbrial assembly protein",
+                   "FAP",des2),
+         des2=gsub(".*\\(thiE\\)",
+                   "thiE",des2),
+         des2=gsub("iron-containing.*",
+                   "FeADH",des2),
+         des2=gsub("LysR family transcriptional regulator",
+                   "LysR-type regulator",des2))%>%
+  mutate(des2=gsub("ABC transporter ATP-binding protein",
+                   "ABCT_ABP",des2),
+         des2=gsub("nitrate reductase assembly","",des2),
+         lab_name= case_when(
+    des2%in%c(illustrate) ~ des2,
+    !(des2%in%c(illustrate)) ~ ""),
+    gene_ID=NULL)
+
+
+tnseq_df<-full_join(HMM.tn,mek.tn)%>%
+  mutate(HMM=gsub("D","E",HMM),
+         HMM=replace(HMM,HMM=="","No Data"),
+         HMM=replace(HMM,is.na(HMM),"No Data"),
+         mek_labs=replace(mek_labs,is.na(mek_labs),"No Data"),
+         full_know=case_when(mek_labs=="E"|HMM=="E"~" ESS  ",
+                             mek_labs=="S"|HMM=="S"~" Semi  ",
+                             mek_labs=="NE"|HMM=="NE"~" Non Ess",
+                             mek_labs=="No Data"|
+                             HMM=="No Data"~" No Data  "))
+
+#load in graph and join in all relevant data from above
+in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
+  mutate(Neighbours = centrality_degree(mode="total")) %>%
+  activate(nodes)%>%
+  left_join(alties,by=c("name"="gene"))%>%
+  left_join(David.in,c("name"="name"))%>%
+  left_join(notes)%>%
+  left_join(tnseq_df)%>%
+  #LOOK HERE LATER CORY
+  left_join(microarrays%>%as_tibble(),c("name"="name"))%>%
+  mutate(
+    annotation=replace(
+      annotation,is.na(annotation),
+      "Unknown"),
+    full_know=replace(
+      full_know,is.na(full_know),
+      " No Data  "),
+    hypno2=case_when(
+      hypno=="Unknown" & 
+        full_know%in%
+        c(" Semi  "," ESS  ") 
+      ~"Important\nUnknown",
+      hypno!="Unknown" | 
+        !(full_know%in%
+            c(" Semi  "," ESS  "))
+      ~hypno))%>%
+  activate(edges)%>%
+  mutate(
+    weight_bin=case_when(
+      weight<0~"Negative",
+      weight>0~"Positive"))
+
+node_df<-in_g%>%activate(nodes)%>%as_tibble()
+fwrite(node_df,"Paper/Tables/S2.csv")
+edge_df<-in_g%>%activate(edges)%>%as_tibble()
+```
+
+## Figure 1
+```{r Fig1}
+
+examp_genes<-c("VC0383","VC0384","VC0385","VC0386","VC0388")
+qqq <- count.out %>% 
+  mutate(rs=rowMeans(count.out[,!c("vc_names"),with=F]))%>%
+  gather(key="sample",value="some",-vc_names,-rs) %>%
+  mutate(real_some=some)%>%
+  filter(vc_names %in% examp_genes)
+
+qqq$vcnames<-
+  factor(
+    qqq$vc_names,
+    levels=c("VC0383","VC0384","VC0385","VC0386","VC0388")
+    )
+
+expression_summary<-heat_func(qqq)+
+  theme(axis.title.y = element_blank())
+
+fig1_g<-in_g%>%
+  activate(nodes)%>%
+  filter(name%in%c("VC0383","VC0384","VC0385","VC0386","VC0388"))%>%
+  activate(edges)%>%
+  filter(abs(weight)>=0.1)
+
+grpies<-create_layout(fig1_g, layout = "auto")
+
+fig1_graph<-ggraph(grpies)+
+  geom_edge_link(aes(colour=weight_bin,alpha=0.5))+
+  scale_edge_colour_manual(values=realpal,name="Correlation")+
+  geom_node_point(aes(fill=as.factor(annotation),colour=as.factor(annotation),shape=hypno2),size=4) +
+  geom_node_text(aes(label=name),size=4,repel=T)+
+  scale_shape_manual(name="Function",values=c(23,21,22))+
+  guides(fill = guide_legend(override.aes=list(shape=21)))+
+  scale_colour_manual(name="Predicted Pathway",values=realdark,guide = 'none')+
+  scale_fill_manual(name="Predicted Pathway",values=realpal)+
+  scale_edge_alpha(range=c(0.10,0.5),guide=FALSE)+
+  scale_alpha(range=c(0.70,1),guide=FALSE)+
+  coord_cartesian(clip = 'off')+
+  scale_x_continuous(expand=c(0.15,0))+
+  scale_y_continuous(expand=c(0.15,0))+
+  theme_cowplot(12)+
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_blank())
+
+corall<-cor(datExpr0)[c("VC0383","VC0384","VC0385","VC0386","VC0388"),c("VC0383","VC0384","VC0385","VC0386","VC0388")]%>%
+  as_tibble(rownames="Sample")%>%
+  gather(key=gene,value=corr, -Sample)%>%
+  mutate(gene=factor(gene, levels=c("VC0383","VC0384","VC0385","VC0386","VC0388")))
+  
+corheat<-ggplot(corall,aes(x=Sample,y=rev(gene),fill=corr))+
+  geom_tile()+
+  theme_cowplot(12)+
+    theme(
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line = element_blank())+
+  scale_fill_distiller(palette="RdYlBu",
+                         direction=-1,
+                         name="Correlation",
+                         limits=c(-1,1),
+                         breaks=c(-1,0,1))
+
+tom_c1<-TOM[c("VC0383","VC0384","VC0385","VC0386","VC0388"),c("VC0383","VC0384","VC0385","VC0386","VC0388")]%>%
+  as_tibble(rownames = "Sample")%>%
+  gather(key=gene,value=corr, -Sample)%>%
+  mutate(corr=if_else(corr==1,as.numeric(NA_integer_),corr),
+         corr=corr/max(corr,na.rm=T),
+         gene=factor(gene, levels=rev(c("VC0383","VC0384","VC0385","VC0386","VC0388"))))
+  # arrange(desc(gene))
+
+
+corheat4<-ggplot()+
+  geom_tile(data=tom_c1,aes(x=Sample,y=gene,fill=corr))+
+  scale_fill_distiller(palette="RdYlBu",
+                         direction=-1,
+                         name="Relative\nCo-\nexpression",
+                         limits=c(-1*max(tom_c1$corr,na.rm=T),1*max(tom_c1$corr,na.rm=T)),
+                         breaks=c(-1,0,1)
+                       )+
+  theme_cowplot(12)+
+    theme(
+          axis.title = element_blank(),
+          axis.ticks = element_blank(),
+          axis.line = element_blank())+
+  coord_cartesian(clip="off")
+ 
+save_plot(
+  "Figures/Fig1.pdf",
+  plot_grid(
+    expression_summary,
+    corheat,
+    corheat4,
+    fig1_graph,
+    ncol=2,labels=c("A","B","C","D")),
+  base_height = 9,base_aspect_ratio = 1.75)
+  
+           
+```
+
+## Figure 3 Infection
+```{r Infection_fig}
+layouts<-c("stress","lgl","fr","graphopt","randomly",
+           "nicely","sugiyama","dh","mds","kk",
+           "gem")
+dont_connect<-c("VC1329",
+                "VCA0951",
+                "VC1449",
+                "VC1450")
+ggg<-create_layout(in_g%>%
+                     activate(edges)%>%
+                     filter(abs(weight)>=0.1)%>%
+                     activate(nodes)%>%
+                     filter(dynamicColors%in%"skyblue3" & !(name%in%dont_connect)), layout = "lgl")
+
+in_g%>%
+                     activate(edges)%>%
+                     filter(abs(weight)>=0.1)%>%
+                     activate(nodes)%>%
+                     filter(dynamicColors%in%"skyblue3"& !(name%in%dont_connect))%>%as_tibble()->nnns
+
+aval=0.05
+sss=4.5
+
+ballsy<-ggraph(ggg) +
+  geom_edge_link(
+    colour="black",
+    alpha=aval
+    ) +
+  geom_node_point(aes(fill=as.factor(annotation),colour=as.factor(annotation),shape=hypno2),size=sss) +
+  geom_node_text(aes(label=des2),size=4,repel=T)+
+  scale_shape_manual(name="Function",values=c(23,21,22))+
+  guides(fill = guide_legend(override.aes=list(shape=21)))+
+  scale_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none')+
+  scale_fill_manual(name="Predicted\nPathway",values=realpal)+
+  coord_cartesian(clip = 'off')+
+  theme_cowplot(12)+
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_blank(),
+        legend.position = c(0.035,0.275),
+        legend.text = element_text(size=10),
+        legend.box = "horizontal",
+        legend.title = element_text(size=14))+
+  NULL
+
+funs.dt<-fread("data_in/binding_aff.csv")
+plotsy<-ggplot(funs.dt[gene!="VC2387"],
+       aes(x=gene,y=binding,fill=binder))+
+  geom_bar(stat="identity",position = "dodge")+
+  geom_errorbar(aes(ymin=binding-sdev,ymax=binding+sdev),position = position_dodge(.9),width=.2)+
+  scale_y_continuous(name="Mean Binding Affinity",expand=c(0,0),limits=c(0,5))+
+  scale_x_discrete(expand=c(0,0))+
+  scale_fill_manual(values=c("blue1","salmon"),name="Tx Factor")+
+  theme_cowplot(12)+
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        plot.margin=margin(1,0.5,0.5,0.5,"cm"))+
+  coord_flip()
+
+save_plot("Figures/Fig3.pdf",
+          plot_grid(ballsy,
+                    plotsy,
+                    nrow=2,
+                    labels=c("A Virulence co-expression cluster","B Binding affinity for virulence Tx factors at locus VCA0094-96"), 
+                    rel_heights=c(0.7,0.3),
+                    hjust=0,
+                    vjust=1.25,
+                    align="vh",
+                    axis = "l"),
+          base_height = 7.5,base_aspect_ratio=1.3)
+```
+
+## Pie Chart
+```{r pie_chart}
+###Notes
+# darkslatelue=rRNA
+# salmon=tRNA
+# grey60=amino acid synthesis
+# midnightblue=ribosomal proteins
+# mediumpurple3=biofilm
+# skyblue3=virulence
+# lightyellow=T6SS
+pizza_totes <- node_df %>%
+  group_by(dynamicColors)%>%
+  summarise(ptotal=n())%>%
+  mutate(x_pos=c(0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3,4,
+                 0,1,2,3),
+         y_pos=c(rep(9,5),
+                 rep(8,5),
+                 rep(7,5),
+                 rep(6,5),
+                 rep(5,5),
+                 rep(4,5),
+                 rep(3,5),
+                 rep(2,5),
+                 rep(1,5),
+                 rep(0,4)),
+         bettername=dynamicColors)
+
+pizza<-node_df %>%
+  group_by(dynamicColors,hypno2,hypno) %>%
+  summarise(nsub=n()) %>%
+  ungroup%>%
+  full_join(pizza_totes)%>%
+mutate(psub=nsub/ptotal)%>%
+  mutate(hypno2=factor(hypno2,levels=c("Known","Important\nUnknown","Unknown")),
+         genes=gsub("Unknown|Important\nUnknown","",hypno2),
+         genes=gsub("Known","genes",genes),
+         ptoes=case_when(hypno2=="Known" ~
+                           as.character(paste0(ptotal,
+                                               " genes")),
+                          hypno2!="Known" ~ "")) %>%
+  mutate(end_angle=2*pi*nsub/ptotal,
+         #end_angle=end_angle+start_angle,
+         start_angle=lag(end_angle, default = 0),
+         mid_angle = 0.5*(start_angle + end_angle),
+         hjust = ifelse(mid_angle>pi, 1, 0),
+         vjust = ifelse(mid_angle<pi/2 | 
+                          mid_angle>3*pi/2, 0, 1))
+setorder(pizza,-hypno2)
+
+pie_chart<-ggplot(data=pizza)+
+  geom_arc_bar(aes(x0=x_pos,y0=y_pos,r0=0,r=0.35,amount=nsub,fill=hypno2,colour=hypno2),stat="pie")+
+  geom_text(aes(label=bettername,x=x_pos,y=y_pos+0.55),size=5)+
+  geom_text(aes(label=ptoes,x=x_pos,y=y_pos+0.435))+
+  scale_fill_manual(values=c("skyblue2",
+                             "#DE2D26",
+                             "#FEE0D2",
+                             "black"),
+              labels=c("Known","Unknown Important","Unknown Other"),
+              name="Function")+
+  scale_colour_manual(values=c("skyblue2",
+                             "#DE2D26",
+                             "#FEE0D2",
+                             "black"),
+              labels=c("Known","Unknown Important","Unknown Other"),
+              name="Function")+
+  theme(legend.title=element_blank(),
+        legend.justification = "center",
+        axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text = element_blank(),
+        legend.position=c(0.875,0.17),
+        legend.key = element_rect(color = NA, fill = NA),
+        legend.key.size = unit(1, "cm"))
+save_plot("Figures/pie_chart.pdf",pie_chart,base_height=7,base_aspect_ratio = 1.2)
+
+```
+
+
+# Figure 2
+```{r Simple_Graphs}
+# darkslatelue=rRNA
+# salmon=tRNA
+# grey60=amino acid synthesis
+# midnightblue=ribosomal proteins
+# mediumpurple3=biofilm
+# skyblue3=virulence
+# lightyellow=T6SS
+faces<-c(
+  # "darkslateblue",
+         "salmon",
+         "grey60",
+         "midnightblue",
+          "mediumpurple3",
+         # "lightyellow",
+  NULL
+  )
+
+exclude<-c("VCt090",
+           "VCt093",
+           "VC2099",
+           "VC0905",
+           "VCA0563",
+           "VCA0680",
+           "VCA0678",
+           "VC1297"
+           )
+
+facetted<-in_g%>%
+  activate(edges)%>%
+  activate(nodes)%>%
+  filter(dynamicColors%in%faces &
+           !(name %in% exclude))%>%
+  mutate(facetted_labs=if_else(dynamicColors=="mediumpurple3",
+                               des2,
+                               ""))%>%
+  activate(edges)%>%
+  filter(abs(weight)>=0.10)
+
+connects<-facetted%>%
+  as_tibble()%>%
+  select(to,from)%>%
+  unlist()%>%
+  unique()
+
+facetted<-facetted%>%
+  activate(nodes)%>%
+  dplyr::slice(connects)
+
+
+aval=0.05
+sss=2.25
+
+facet_func<-function(gene_filt,ly){
+  
+  ggraph(facetted%>%filter(dynamicColors%in%gene_filt),layout = ly) +
+  geom_edge_link(colour="grey50",
+                 alpha=aval) +
+  geom_node_point(aes(shape=hypno2,fill=as.factor(annotation),colour=as.factor(annotation)),size=sss)+
+  geom_node_text(aes(label=facetted_labs),size=2.75,repel=T)+
+  scale_shape_manual(name="Function",values=c(23,21,22))+
+  scale_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none')+
+  scale_fill_manual(name="Predicted\nPathway",values=realpal)+
+  guides(fill = guide_legend(override.aes=list(shape=21)))+
+  theme_cowplot(12)+
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none")
+}
+
+trna <- facet_func("salmon","lgl")
+rbs <- facet_func("midnightblue","lgl")
+aa_synth <- facet_func("grey60","lgl")
+biofilm <- facet_func("mediumpurple3","lgl")
+
+legz <- ggraph(facetted%>%filter(!duplicated(annotation) | !duplicated(hypno2)),layout = "lgl") +
+  geom_edge_link(colour="grey50",
+                 alpha=aval) +
+  geom_node_point(aes(shape=hypno2,fill=as.factor(annotation),colour=as.factor(annotation)),size=sss)+
+  geom_node_text(aes(label=facetted_labs),size=2.75,repel=T)+
+  scale_shape_manual(name="Function",values=c(23,21,22))+
+  # facet_nodes(~factor(dynamicColors,
+  #                      levels=c(
+  #                               "salmon",
+  #                               "midnightblue",
+  #                               "grey60",
+  #                               "mediumpurple3"),
+  #                     labels = c(
+  #                                "tRNA",
+  #                                "Ribosomal Proteins",
+  #                                "Amino Acid Synthesis",
+  #                                "Biofilm")),scales="free")+
+  scale_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none')+
+  scale_fill_manual(name="Predicted\nPathway",values=realpal)+
+  guides(fill = guide_legend(override.aes=list(shape=21)))+
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        NULL)
+
+legz <- get_legend(legz)
+  
+
+save_plot("Figures/Fig2.pdf",
+          plot_grid(
+            plot_grid(
+              trna,rbs,
+              aa_synth,
+              biofilm,
+              nrow=2,
+              labels = c("A tRNA Transcripts","B Ribosome Related","C Amino Acid Synthesis","D Biofilm"),
+              scale=0.9, 
+              hjust = 0),
+            legz,
+            ncol=2,
+            rel_widths=c(0.85,0.15)),
+          base_height = 6,
+          base_aspect_ratio=1.5)
+```
+
+# Figure 4 RPOS
+```{r rpos}
+#rpos = green
+#hapr = paleturquoise
+#toxr = brown
+#toxs = pink
+#tcpPH = royalblue
+#toxt = skyblue3
+
+cutoff=0.10
+
+rpos_corr<-tibble(name=names(TOM[,"VC0534"]),corr=TOM[,"VC0534"])%>%
+  filter(abs(corr)>=0.10)
+flag_meth<-fread("data_in/flag_meth.csv")%>%
+  filter(abs(rpoS)>=1)
+rpos_in<-fread("data_in/rpos_data.csv")%>%unique()
+rpos_over<-rpos_corr%>%inner_join(rpos_in)
+rpos_flag<-rpos_over%>%inner_join(flag_meth)
+
+rpos_totes<-tibble(name=names(TOM[,"VC0534"]),corr=TOM[,"VC0534"])%>%
+  filter(abs(corr)>=cutoff)%>%
+  full_join(fread("data_in/rpos_data.csv"))%>%
+   mutate(log2_rpos=if_else(is.na(log2_rpos),0,log2_rpos),
+         cutz=if_else(log2_rpos==0,0,1),
+         flag=if_else(name%in%flag_meth$name,1,0),
+         name=gsub("VC","VC",name))%>%
+  left_join(node_df%>%select(-log2_rpos))
+
+correlate_this<-rpos_totes%>%
+  filter(!is.na(corr)& log2_rpos!=0)
+cor(correlate_this$corr, correlate_this$log2_rpos,
+    method="spearman")
+
+net_total<-nrow(rpos_totes%>%filter(!is.na(corr)))
+micro_total<-nrow(rpos_totes%>%filter(abs(log2_rpos)>=1))
+overlap<-nrow(rpos_totes%>%filter(abs(log2_rpos)>=1 & !is.na(corr)))
+
+
+dev.off()
+grid.newpage()
+venn.plot<-
+  draw.pairwise.venn(
+    net_total,micro_total,overlap,
+    category=c("Network","Microarray"),
+    euler.d=T,
+    fill=c("blue4","red4"),
+    cat.pos = c(0,13),
+    cat.dist = c(0.02,0.05),
+    alpha=c(0.30, 0.30),
+    cex=c(2.5,2.5,2.5),
+    cat.cex=c(1.7,1.7)
+    )
+
+rpos_overlaps<-tibble(
+  counts=c(nrow(rpos_over)-nrow(rpos_flag),
+           nrow(rpos_flag)),
+  locations=factor(
+    c("Both","Both"),
+    levels=c("Both")),
+           Genes=factor(
+             c("Other",
+               "Flagellar/Chemotaxis"),
+             levels=c(
+               "Other",
+               "Flagellar/Chemotaxis"
+               )))
+
+rpos_fill<-c(
+  "Flagellar/Chemotaxis"="paleturquoise2",
+  "Other"=darken("paleturquoise2",amount=0.4),
+  "Microarray Only"="red")
+rpos_plot<-ggplot(rpos_overlaps,aes(x=locations,y=counts,fill=Genes))+
+  geom_bar(stat="identity",colour="black")+
+  scale_fill_manual(name="", values=rpos_fill)+
+  coord_polar(theta="y")+
+  theme_cowplot(12)+
+  theme(legend.position = c(0.10,1),
+        legend.direction = "horizontal",
+        axis.ticks = element_blank(),
+        axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        text = element_text(size=20))+
+  geom_text(aes(x=locations,y=counts-32,label=counts),size=10)
+
+save_plot("Figures/Fig4.pdf",plot_grid(grobTree(venn.plot),
+                                       rpos_plot,labels="AUTO", nrow = 1,rel_widths = c(0.65,0.35)),base_height = 8,base_aspect_ratio = 1.6)
+```
+
+
