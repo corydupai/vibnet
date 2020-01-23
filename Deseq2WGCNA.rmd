@@ -21,6 +21,8 @@ library(ggforce)
 ```{r}
 cbbPalette <- c("#56B4E9","#0072B2","#D55E00","grey90","#009E73","grey70","#E69F00","#CC79A7","grey50","grey30","black")
 
+set.seed(09022018)
+
 realpal <- c(
              "Metabolism"="#E69F00", 
              "Ribosome"="#009E73",
@@ -90,6 +92,14 @@ count.out<-
                )[,vc_names:=gsub("\\|.*$","",vc_names)
                 ][!duplicated(vc_names)])
 
+tempcol <- colnames(count.out)
+tempcol <- tempcol[tempcol!="vc_names"]
+counttemp<-round( count.out[,!c("vc_names")], 3)
+
+counttemp <- counttemp[,Transcript:=count.out$vc_names] %>%
+  select(Transcript,everything())
+
+fwrite(counttemp,"temp.csv")
 positions <- 
   unique(fread('genome_info/positions.csv'
                )[Type%in%c("CDS","rRNA","tRNA","fCDS")])
@@ -228,7 +238,9 @@ keep.genes<-alties%>%
   filter(dynamicColors%in%c("skyblue3"))%>%
   mutate(gene=gsub("_","",gene))
 
-cyt = exportNetworkToCytoscape(TOM,
+tempTOM <- round(TOM,digits=6)
+
+cyt = exportNetworkToCytoscape(tempTOM,
 edgeFile = "data_out/0.10_net_redo.txt",
 nodeFile = "data_out/0.10_nodes_redo.txt",
 weighted = T,
@@ -645,11 +657,12 @@ ballsy<-ggraph(ggg) +
         panel.grid.minor = element_blank(),
         strip.background = element_blank(),
         panel.border = element_blank(),
-        legend.position = c(0.035,0.275),
+        legend.position = c(0.735,0.2),
         legend.text = element_text(size=10),
         legend.box = "horizontal",
         legend.title = element_text(size=14))+
   NULL
+ballsy
 
 funs.dt<-fread("data_in/binding_aff.csv")
 plotsy<-ggplot(funs.dt[gene!="VC2387"],
@@ -670,7 +683,7 @@ save_plot("Figures/Fig3.pdf",
           plot_grid(ballsy,
                     plotsy,
                     nrow=2,
-                    labels=c("A Virulence co-expression cluster","B Binding affinity for virulence Tx factors at locus VCA0094-96"), 
+                    labels=c("A","B"), 
                     rel_heights=c(0.7,0.3),
                     hjust=0,
                     vjust=1.25,
@@ -846,7 +859,9 @@ venn.plot<-
     cat.dist = c(0.02,0.05),
     alpha=c(0.30, 0.30),
     cex=c(2.5,2.5,2.5),
-    cat.cex=c(1.7,1.7)
+    cat.cex=c(1.7,1.7),
+    fontfamily = rep("sans", 3),
+    cat.fontfamily = rep("sans", 2)
     )
 
 rpos_overlaps<-tibble(
