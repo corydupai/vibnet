@@ -15,6 +15,7 @@ library(colorspace)
 library(RColorBrewer)
 library(VennDiagram)
 library(ggforce)
+library(zoo)
 
 ```
 
@@ -220,7 +221,7 @@ sign.it[sign.it>0]<-(1)
 TOM <- TOM*sign.it
 
 alties<-tibble(gene=colnames(adjacency)) %>%
-  left_join(positions[,c("gene","gene_ID")])%>%
+  left_join(positions[,c("gene","gene_ID","start","end")])%>%
   mutate(gene=gsub("VC","VC",gene))%>%
   mutate(gene_ID=case_when(gene_ID==""~gene,
                                            gene_ID!=""~gene_ID))%>%
@@ -229,12 +230,12 @@ alties<-tibble(gene=colnames(adjacency)) %>%
 
 fwrite(alties,"genome_info/fullnames.csv")
 
-datExpr1 = as.data.frame(count.out[,!c("vc_names")])
-names(datExpr1) = names(count.out[,!c("vc_names")])
-rownames(datExpr1) = alties[,"gene"]
-full_genes<-alties[,"gene"]
+datExpr1 <- as.data.frame(count.out[,!c("vc_names")])
+names(datExpr1) <- names(count.out[,!c("vc_names")])
+rownames(datExpr1) <- alties[,"gene"]
+full_genes <- alties[,"gene"]
 
-keep.genes<-alties%>%
+keep.genes<- alties%>%
   filter(dynamicColors%in%c("skyblue3"))%>%
   mutate(gene=gsub("_","",gene))
 
@@ -379,14 +380,27 @@ names(real_names)<-list("Myriad",
 
 
 ```{r}
+#read in operon data
+operons <- fread("data_in/list_of_operons_516", fill = TRUE
+                )[,Operon := na.locf(Operon)
+                ][!is.na(PosLeft)
+                ][, Op_length := length(Strand), by = "Operon"
+                ][, start := PosLeft
+                ][, end := postRight
+                ][end == 3791, chromosome := 2
+                ][end == 806, chromosome := 1
+                ][,chromosome := na.locf(chromosome)
+                ][IdGene == "oadA", IdGene := "oadA-1"
+                ][IdGene == "oadA_2", IdGene := "oadA"
+                ][,chrom2:=chromosome]
+# ORFs <- fread("data_in/ORFs_coordinates_516")
 
+#read in microarray data
 microarrays<-merge(microarrays,fread("data_in/toxr_data.csv"),all=T
                    )[,log2_toxT:=log2(log2_toxT)
                    ][,log2_toxRS:=log2(log2_toxR)
                    ][,log2_tcpPH:=log2(log2_tcpPH)
                    ][,!c("log2_toxR","SAM")]%>%as_tibble()%>%unique()
-
-
 
 #get better gene symbols
 David.in[OFFICIAL_GENE_SYMBOL!=""&
@@ -457,6 +471,10 @@ David.in<-David.in%>%
     !(des2%in%c(illustrate)) ~ ""),
     gene_ID=NULL)
 
+skip_these <- c("VC2107",
+                "VC0606",
+                "VCA1096")
+
 
 tnseq_df<-full_join(HMM.tn,mek.tn)%>%
   mutate(HMM=gsub("D","E",HMM),
@@ -475,9 +493,27 @@ in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
   activate(nodes)%>%
   left_join(alties,by=c("name"="gene"))%>%
   left_join(David.in,c("name"="name"))%>%
+  mutate(chromosome = case_when(grepl("VCA",name) ~ 2,
+                                grepl("VC",name) ~ 1,
+                                TRUE ~ 3),
+         gene_ID = ifelse(name == "VCA0053", "deoD_2", gene_ID),
+         match_me = ifelse(name %in% skip_these, "Skip", "Keep")
+         ) %>%
   left_join(notes)%>%
   left_join(tnseq_df)%>%
-  #LOOK HERE LATER CORY
+  left_join(operons[,c("Operon","end","Op_length","chromosome")], c("end", "chromosome"))%>%
+  left_join(operons[,c("Operon","start","chromosome")], 
+            c("start", "chromosome"))%>%
+  left_join(operons[,c("Operon","IdGene","chromosome")], 
+            c("gene_ID"="IdGene",
+              "chromosome"))%>%
+  mutate(Operon = ifelse( is.na(Operon) & 
+                            is.na(Operon.x) &
+                            is.na(Operon.y),
+                          as.numeric(NA),
+                          max(c(Operon, Operon.x, Operon.y), na.rm = T)),
+         Operon.x = NULL,
+         Operon.y = NULL) %>%
   left_join(microarrays%>%as_tibble(),c("name"="name"))%>%
   mutate(
     annotation=replace(
@@ -503,7 +539,27 @@ in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
 
 node_df<-in_g%>%activate(nodes)%>%as_tibble()
 fwrite(node_df,"Paper/Tables/S2.csv")
-edge_df<-in_g%>%activate(edges)%>%as_tibble()
+# edge_df<-in_g%>%activate(edges)%>%as_tibble()
+
+in_g <- in_g %>% activate(edges) %>%
+  mutate(n1 = node_df[from, "name"] %>% unlist(),
+         n2 = node_df[to, "name"] %>% unlist(),
+         o1 = node_df[from, "Operon"] %>% unlist(),
+         o2 = node_df[to, "Operon"] %>% unlist())
+
+no_operons <- in_g %>%
+  activate(edges) %>%
+  filter(!(o1 == o2) | is.na(to))
+
+all_operons <- in_g %>% 
+  activate(edges) %>%
+  filter(o1 == o2 & !is.na(to))
+
+all_operons %>% activate(edges) %>%
+  filter(!is.na(to) & abs(weight) >= 0.10) %>%
+  select(weight) %>%
+  median()
+
 ```
 
 ## Figure 1
@@ -560,9 +616,9 @@ fig1_graph<-ggraph(grpies)+
 corall<-cor(datExpr0)[c("VC0383","VC0384","VC0385","VC0386","VC0388"),c("VC0383","VC0384","VC0385","VC0386","VC0388")]%>%
   as_tibble(rownames="Sample")%>%
   gather(key=gene,value=corr, -Sample)%>%
-  mutate(gene=factor(gene, levels=c("VC0383","VC0384","VC0385","VC0386","VC0388")))
+  mutate(gene=factor(gene, levels=rev(c("VC0383","VC0384","VC0385","VC0386","VC0388"))))
   
-corheat<-ggplot(corall,aes(x=Sample,y=rev(gene),fill=corr))+
+corheat<-ggplot(corall,aes(x=Sample,y=gene,fill=corr))+
   geom_tile()+
   theme_cowplot(12)+
     theme(
@@ -825,7 +881,7 @@ rpos_corr<-tibble(name=names(TOM[,"VC0534"]),corr=TOM[,"VC0534"])%>%
 flag_meth<-fread("data_in/flag_meth.csv")%>%
   filter(abs(rpoS)>=1)
 rpos_in<-fread("data_in/rpos_data.csv")%>%unique()
-rpos_over<-rpos_corr%>%inner_join(rpos_in)
+rpos_over<-rpos_corr%>%inner_join(rpos_in)%>%filter(abs(log2_rpos)>=1)
 rpos_flag<-rpos_over%>%inner_join(flag_meth)
 
 rpos_totes<-tibble(name=names(TOM[,"VC0534"]),corr=TOM[,"VC0534"])%>%
