@@ -1,22 +1,30 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
 ```{r}
-library(data.table)
+library(clusterProfiler)
+library(zoo)
+library(VennDiagram)
 library(WGCNA)
-library(ggraph)
+library(igraph)
 library(grid)
 library(gridExtra)
-library(tidygraph)
+library(data.table)
 library(tidyverse)
+library(ggraph)
+library(tidygraph)
 library(ggrepel)
 library(cowplot)
 library(ggfortify)
-library(igraph)
 library(ungeviz)
 library(colorspace)
 library(RColorBrewer)
-library(VennDiagram)
 library(ggforce)
-library(zoo)
-
+library(parallel)
+library(ggtext)
+library(rlang)
 ```
 
 ```{r}
@@ -25,15 +33,15 @@ cbbPalette <- c("#56B4E9","#0072B2","#D55E00","grey90","#009E73","grey70","#E69F
 set.seed(09022018)
 
 realpal <- c(
-             "Metabolism"="#E69F00", 
+             "Cellular Processes"="#E69F00", 
              "Ribosome"="#009E73",
-             "RNA/DNA"="grey65",
+             "T6SS"="black",
              "rRNA"="#D55E00",
              "Amino Acid Synthesis"="#D55E00",
              "Replication"="#56B4E9",
              "tRNA" = "#56B4E9",
              "Secretion System"="#F0E442",
-             "T6SS"="#F0E442",
+             "RNA/DNA"="#F0E442",
              "Biofilm"="#0072B2", 
              "Virulence"="#CC79A7",
              "Unclear"="white",
@@ -49,14 +57,26 @@ realpal <- c(
              "grey75"="grey75",
              "randos"="grey10",
              "Positive"="blue",
-             "Negative"="red")
+             "Negative"="red",
+             "Competence"="grey65",
+             "Cell Cycle"="purple",
+             "Operon" = "black",
+             "Noperon" = "black",
+             "Unclear2" = "black")
 
-pieslices<-c("Network Known"= "#8C94BF",
+# pieslices<-c("Network Known"= "#8C94BF",
+#              "Known"="skyblue2",
+#              "Network Unknown"= "plum2",
+#              "Unknown"= "orangered3",
+#              "Network"= "#8C94BF",
+#              "Non-network"= "plum2")
+
+pieslices<-c("Important\nUnknown"= "plum2",
              "Known"="skyblue2",
-             "Network Unknown"= "plum2",
              "Unknown"= "orangered3",
-             "Network"= "#8C94BF",
-             "Non-network"= "plum2")
+             "Noperon" = "black",
+             "Operon" = "red",
+             "Unclear2" = "grey50")
 realdark<-darken(realpal,amount=0.5)
 names(realdark)<-names(realpal)
 ```
@@ -85,6 +105,28 @@ heat_func<-function(qqq){
 }
 ```
 
+```{r facet_lab_funcs}
+# Source : https://stackoverflow.com/questions/60332202/conditionally-fill-ggtext-text-boxes-in-facet-wrap
+element_textbox_highlight <- function(..., hi.labels = NULL, hi.fill = NULL,
+                                      hi.col = NULL, hi.box.col = NULL) {
+  structure(
+    c(element_textbox(...),
+      list(hi.labels = hi.labels, hi.fill = hi.fill, hi.col = hi.col, hi.box.col = hi.box.col)
+    ),
+    class = c("element_textbox_highlight", "element_textbox", "element_text", "element")
+  )
+}
+
+element_grob.element_textbox_highlight <- function(element, label = "", ...) {
+  if (label %in% element$hi.labels) {
+    element$fill <- element$hi.fill %||% element$fill
+    element$colour <- element$hi.col %||% element$colour
+    element$box.colour <- element$hi.box.col %||% element$box.colour
+  }
+  NextMethod()
+}
+
+```
 
 ```{r load data}
 
@@ -133,7 +175,15 @@ microarrays<-merge(fread("data_in/rpos_data.csv"),fread("data_in/hapr_data.csv")
 #Load GO and gene label info from David
 
 #manual annotation file
-notes<-fread("data_in/annotations4figs.csv",header=T)[,name:=gsub("VC_","VC",name)][,c("name","annotation")]
+notes <- fread("data_in/annotations4figs.csv",header=T
+               )[,c("name","annotation")
+               ][ annotation == "Motility", annotation := "Biofilm"
+               ][ annotation %in% c("SOS",
+                                    "Metabolism",
+                                    "Cell Cycle",
+                                    "Transcription/Translation"),
+                  annotation := "Cellular Processes"
+               ] %>% unique()
 
 #TN-seq data (work on working in)
 mek.tn<-fread("data_in/FC_data_in_host_Mek.csv"
@@ -152,11 +202,7 @@ mek.tn<-fread("data_in/FC_data_in_host_Mek.csv"
 #HMM tnseq data
 HMM.tn<-fread("genome_info/tnseq_HMM.csv")
 
-David.in<-merge(fread("genome_info/David.tsv",
-                         sep ="\t",sep2="\t",fill=TRUE)[,name:=ID],
-                   fread("genome_info/fullnames.csv"),by.x="name",by.y="gene",all=T)
 ```
-
 
 ```{r matrices}
 datExpr0 = as.data.frame(t(count.out[,!c("vc_names")]))
@@ -167,10 +213,9 @@ TOM = TOMsimilarity(adjacency)
 dissTOM = 1-TOM
 ```
 
-
 ```{r clust_and_colors}
-geneTree = hclust(
-  as.dist(dissTOM), 
+geneTree = stats::hclust(
+  as.dist(dissTOM),
   method="mcquitty"
   )
 
@@ -182,6 +227,7 @@ dynamicMods =
                 distM = dissTOM,
                 deepSplit = 2, pamRespectsDendro = FALSE,
                 minClusterSize = minModuleSize)
+remove(dissTOM)
 
 # Convert numeric lables into colors
 dynamicColors = labels2colors(dynamicMods)
@@ -378,7 +424,6 @@ names(real_names)<-list("Myriad",
 
 ```
 
-
 ```{r}
 #read in operon data
 operons <- fread("data_in/list_of_operons_516", fill = TRUE
@@ -402,6 +447,11 @@ microarrays<-merge(microarrays,fread("data_in/toxr_data.csv"),all=T
                    ][,log2_tcpPH:=log2(log2_tcpPH)
                    ][,!c("log2_toxR","SAM")]%>%as_tibble()%>%unique()
 
+
+David.in<-
+  merge(fread("genome_info/David.tsv",
+                         sep ="\t",sep2="\t",fill=TRUE)[,name:=ID],
+                   fread("genome_info/fullnames.csv"),by.x="name",by.y="gene",all=T)
 #get better gene symbols
 David.in[OFFICIAL_GENE_SYMBOL!=""&
               !(is.na(OFFICIAL_GENE_SYMBOL)),
@@ -425,6 +475,7 @@ David.in<-David.in[,GO_M:=GOTERM_MF_DIRECT
           ][,GO_C_num:=gsub("~.*?,$","",GO_C_num)
           ][,GO_C:=gsub(",GO:.*?~|GO:.*?~",";",GO_C)
           ][,GO_C:=gsub("^;|,$","",GO_C)
+          ][,KEGG_PATHWAY := gsub(",vch",";vch",KEGG_PATHWAY)
           ][,KEGG_PATHWAY:=gsub("vch.*?:|,$","",KEGG_PATHWAY)
           ][,c("name","Gene_Name","KEGG_PATHWAY",
                "OFFICIAL_GENE_SYMBOL",
@@ -440,6 +491,7 @@ David.in<-David.in%>%
     ),
     des2 = gsub("VCA1059", "putative pseudouridine methyltransferase",des2)
   ) %>%
+  mutate(des2=gsub("\\(VC.*\\)","",des2)) %>%
   mutate(
     hypno = case_when(
     name%in%weird_genes~"Known",
@@ -448,7 +500,6 @@ David.in<-David.in%>%
     name%in%unknown_surprises~"Unknown",
     !(grepl("VC|VIBCH",
             des2)) ~ "Known")) %>%
-  mutate(des2=gsub("\\(VC.*\\)","",des2)) %>%
   mutate(des2=gsub("methyl-accepting chemotaxis protein",
                    "MACP",des2),
          des2=gsub("5-carboxymethyl-2-hydroxymuconate delta-isomerase",
@@ -461,6 +512,8 @@ David.in<-David.in%>%
                    "thiE",des2),
          des2=gsub("iron-containing.*",
                    "FeADH",des2),
+         des2 = gsub("PTS system fructose-specific transporter subunit IIABC",
+                     "PTS subunit IIABC", des2),
          des2=gsub("LysR family transcriptional regulator",
                    "LysR-type regulator",des2))%>%
   mutate(des2=gsub("ABC transporter ATP-binding protein",
@@ -499,7 +552,8 @@ in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
          gene_ID = ifelse(name == "VCA0053", "deoD_2", gene_ID),
          match_me = ifelse(name %in% skip_these, "Skip", "Keep")
          ) %>%
-  left_join(notes)%>%
+  activate(nodes) %>%
+  left_join(notes, c("name" = "name"))%>%
   left_join(tnseq_df)%>%
   left_join(operons[,c("Operon","end","Op_length","chromosome")], c("end", "chromosome"))%>%
   left_join(operons[,c("Operon","start","chromosome")], 
@@ -507,6 +561,7 @@ in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
   left_join(operons[,c("Operon","IdGene","chromosome")], 
             c("gene_ID"="IdGene",
               "chromosome"))%>%
+  group_by(name) %>%
   mutate(Operon = ifelse( is.na(Operon) & 
                             is.na(Operon.x) &
                             is.na(Operon.y),
@@ -514,6 +569,7 @@ in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
                           max(c(Operon, Operon.x, Operon.y), na.rm = T)),
          Operon.x = NULL,
          Operon.y = NULL) %>%
+  ungroup()%>%
   left_join(microarrays%>%as_tibble(),c("name"="name"))%>%
   mutate(
     annotation=replace(
@@ -535,71 +591,138 @@ in_g <- as_tbl_graph(graph_from_adjacency_matrix(TOM,weighted = T,diag=F)) %>%
   mutate(
     weight_bin=case_when(
       weight<0~"Negative",
-      weight>0~"Positive"))
+      weight>0~"Positive",
+      TRUE ~ "Zero"),
+    abs_weight = abs(weight))%>%
+  filter(abs(weight)>=0.10)
 
-node_df<-in_g%>%activate(nodes)%>%as_tibble()
-fwrite(node_df,"Paper/Tables/S2.csv")
+node_df<-in_g%>%activate(nodes)%>%
+  as_tibble()
+# fwrite(node_df,"Paper/Tables/S2.csv")
 # edge_df<-in_g%>%activate(edges)%>%as_tibble()
 
 in_g <- in_g %>% activate(edges) %>%
   mutate(n1 = node_df[from, "name"] %>% unlist(),
          n2 = node_df[to, "name"] %>% unlist(),
+         c1 = node_df[from, "dynamicColors"] %>% unlist(),
+         c2 = node_df[to, "dynamicColors"] %>% unlist(),
          o1 = node_df[from, "Operon"] %>% unlist(),
-         o2 = node_df[to, "Operon"] %>% unlist())
+         o2 = node_df[to, "Operon"] %>% unlist(),
+         condition = 
+           case_when(is.na(o1) |
+                       is.na(o2) ~
+                       "Unclear2",
+                     o1 != o2 ~ "Noperon",
+                     o1 == o2 ~"Operon"))
 
-no_operons <- in_g %>%
-  activate(edges) %>%
-  filter(!(o1 == o2) | is.na(to))
+```
 
-all_operons <- in_g %>% 
-  activate(edges) %>%
-  filter(o1 == o2 & !is.na(to))
+### Figure Something
+```{r}
 
-all_operons %>% activate(edges) %>%
-  filter(!is.na(to) & abs(weight) >= 0.10) %>%
-  select(weight) %>%
-  median()
 
+# edge_df<-in_g%>%
+#   activate(edges)%>%
+#   as_tibble()
+
+operons_g <- in_g %>% 
+                         activate(edges) %>% 
+                         filter(condition == "Operon")
+# 
+# ggplot(edge_df, 
+#        aes(y = weight, x = condition)) +
+#   geom_violin()
+
+# edge_df %>% filter(is.na(condition))
+
+fig_op_graph<-ggraph(in_g %>%
+                       activate(nodes) %>%
+                       filter(dynamicColors%in%"skyblue3"),
+                       layout = "kk")+
+  geom_edge_link(aes(colour = condition))+
+  # scale_edge_colour_manual(values=realpal,name="Correlation")+
+  geom_node_point(aes(shape = hypno2)) +
+  # geom_node_text(aes(label=name),size=4,repel=T)+
+  scale_shape_manual(name="Function",values=c(23,21,22))+
+  # scale_edge_alpha(range=c(0.10,0.5),guide=FALSE)+
+  # scale_alpha(range=c(0.70,1),guide=FALSE)+
+  coord_cartesian(clip = 'off')+
+  # scale_x_continuous(expand=c(0.15,0))+
+  # scale_y_continuous(expand=c(0.15,0))+
+  theme_cowplot(12)+
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_blank())
+
+fig_op_graph
 ```
 
 ## Figure 1
 ```{r Fig1}
 
-examp_genes<-c("VC0383","VC0384","VC0385","VC0386","VC0388")
+examp_genes <- c("VC0385","VC0386",
+                 "VC0538","VC0539",
+                 "VC0540","VC0541",
+                 "VC0906","VC0907",
+                 "VC0968","VC1611",
+                 "VC1704",
+                 "VC2558","VC2559",
+                 "VC2560","VC2561",
+                 "VC2685",
+                 "VCA0454")
+examp_genes <- c("VC0384","VC0385","VC0386",
+                 "VC0539",
+                 "VC0540",
+                 "VC2722")
+
+
+# examp_genes <- node_df %>%
+#   filter(grepl("cys", gene_ID))%>%
+#   # filter(dynamicColors == "plum2") %>%
+#   select(name) %>%
+#   unlist() %>%
+#   c("VC0383","VC0388")
+
 qqq <- count.out %>% 
   mutate(rs=rowMeans(count.out[,!c("vc_names"),with=F]))%>%
   gather(key="sample",value="some",-vc_names,-rs) %>%
   mutate(real_some=some)%>%
   filter(vc_names %in% examp_genes)
 
-qqq$vcnames<-
-  factor(
-    qqq$vc_names,
-    levels=c("VC0383","VC0384","VC0385","VC0386","VC0388")
-    )
+# qqq$vcnames<-
+#   factor(
+#     qqq$vc_names,
+#     levels=c("VC0383","VC0384","VC0385","VC0386","VC0388")
+#     )
 
 expression_summary<-heat_func(qqq)+
   theme(axis.title.y = element_blank())
 
 fig1_g<-in_g%>%
   activate(nodes)%>%
-  filter(name%in%c("VC0383","VC0384","VC0385","VC0386","VC0388"))%>%
+  filter(name %in% examp_genes)%>%
+  # filter(name%in%c("VC0383","VC0384","VC0385","VC0386","VC0388"))%>%s
   activate(edges)%>%
   filter(abs(weight)>=0.1)
 
-grpies<-create_layout(fig1_g, layout = "auto")
+grpies<-create_layout(fig1_g, layout = "fr")
 
 fig1_graph<-ggraph(grpies)+
-  geom_edge_link(aes(colour=weight_bin,alpha=0.5))+
-  scale_edge_colour_manual(values=realpal,name="Correlation")+
+  geom_edge_link(colour = "grey50",alpha=0.25)+
+  # scale_edge_colour_manual(values=realpal,name="Correlation")+
   geom_node_point(aes(fill=as.factor(annotation),colour=as.factor(annotation),shape=hypno2),size=4) +
   geom_node_text(aes(label=name),size=4,repel=T)+
   scale_shape_manual(name="Function",values=c(23,21,22))+
   guides(fill = guide_legend(override.aes=list(shape=21)))+
   scale_colour_manual(name="Predicted Pathway",values=realdark,guide = 'none')+
   scale_fill_manual(name="Predicted Pathway",values=realpal)+
-  scale_edge_alpha(range=c(0.10,0.5),guide=FALSE)+
-  scale_alpha(range=c(0.70,1),guide=FALSE)+
+  # scale_edge_alpha(range=c(0.10,0.5),guide=FALSE)+
+  # scale_alpha(range=c(0.70,1),guide=FALSE)+
   coord_cartesian(clip = 'off')+
   scale_x_continuous(expand=c(0.15,0))+
   scale_y_continuous(expand=c(0.15,0))+
@@ -613,10 +736,12 @@ fig1_graph<-ggraph(grpies)+
         strip.background = element_blank(),
         panel.border = element_blank())
 
-corall<-cor(datExpr0)[c("VC0383","VC0384","VC0385","VC0386","VC0388"),c("VC0383","VC0384","VC0385","VC0386","VC0388")]%>%
+corall <-
+  cor(datExpr0)[c(examp_genes),c(examp_genes)]%>%
+  # cor(datExpr0)[c("VC0383","VC0384","VC0385","VC0386","VC0388"),c("VC0383","VC0384","VC0385","VC0386","VC0388")]%>%
   as_tibble(rownames="Sample")%>%
   gather(key=gene,value=corr, -Sample)%>%
-  mutate(gene=factor(gene, levels=rev(c("VC0383","VC0384","VC0385","VC0386","VC0388"))))
+  mutate(gene=factor(gene, levels=rev(examp_genes)))
   
 corheat<-ggplot(corall,aes(x=Sample,y=gene,fill=corr))+
   geom_tile()+
@@ -631,12 +756,12 @@ corheat<-ggplot(corall,aes(x=Sample,y=gene,fill=corr))+
                          limits=c(-1,1),
                          breaks=c(-1,0,1))
 
-tom_c1<-TOM[c("VC0383","VC0384","VC0385","VC0386","VC0388"),c("VC0383","VC0384","VC0385","VC0386","VC0388")]%>%
+tom_c1<-TOM[examp_genes,examp_genes]%>%
   as_tibble(rownames = "Sample")%>%
   gather(key=gene,value=corr, -Sample)%>%
   mutate(corr=if_else(corr==1,as.numeric(NA_integer_),corr),
          corr=corr/max(corr,na.rm=T),
-         gene=factor(gene, levels=rev(c("VC0383","VC0384","VC0385","VC0386","VC0388"))))
+         gene=factor(gene, levels=rev(examp_genes)))
   # arrange(desc(gene))
 
 
@@ -677,26 +802,30 @@ dont_connect<-c("VC1329",
                 "VCA0951",
                 "VC1449",
                 "VC1450")
-ggg<-create_layout(in_g%>%
+ggg <- create_layout(in_g%>%
                      activate(edges)%>%
                      filter(abs(weight)>=0.1)%>%
                      activate(nodes)%>%
                      filter(dynamicColors%in%"skyblue3" & !(name%in%dont_connect)), layout = "lgl")
 
-in_g%>%
-                     activate(edges)%>%
-                     filter(abs(weight)>=0.1)%>%
-                     activate(nodes)%>%
-                     filter(dynamicColors%in%"skyblue3"& !(name%in%dont_connect))%>%as_tibble()->nnns
-
-aval=0.05
+aval=0.04
+aval1 = 0.01
+aval2 = 0.12
 sss=4.5
 
-ballsy<-ggraph(ggg) +
+ballsy <- ggraph(ggg) +
+  # geom_edge_link(
+  #   alpha=aval
+  #   ) +
   geom_edge_link(
-    colour="black",
-    alpha=aval
-    ) +
+    # colour="grey50",
+    aes(colour = condition),
+    alpha=aval) +
+  # scale_edge_alpha(range = c(aval1, aval2))+
+  scale_edge_colour_manual(name="Predicted\nPathway",values=realpal,guide = 'none') +
+  # geom_edge_link(aes(colour = condition),
+  #                alpha=aval,
+  #                guide = F)+
   geom_node_point(aes(fill=as.factor(annotation),colour=as.factor(annotation),shape=hypno2),size=sss) +
   geom_node_text(aes(label=des2),size=4,repel=T)+
   scale_shape_manual(name="Function",values=c(23,21,22))+
@@ -713,12 +842,42 @@ ballsy<-ggraph(ggg) +
         panel.grid.minor = element_blank(),
         strip.background = element_blank(),
         panel.border = element_blank(),
-        legend.position = c(0.735,0.2),
+        # legend.position = c(0.735,0.2),
         legend.text = element_text(size=10),
-        legend.box = "horizontal",
+        # legend.box = "horizontal",
         legend.title = element_text(size=14))+
   NULL
-ballsy
+# ballsy
+
+ballsy2 <- ggraph(ggg) +
+  geom_edge_link(
+    aes(colour=condition,
+        alpha = edge_weights),
+    # alpha = 0.2
+    ) +
+  geom_node_point(aes(fill=as.factor(annotation),colour=as.factor(annotation),shape=hypno2),size=sss) +
+  # geom_node_text(aes(label=des2),size=4,repel=T)+
+  scale_shape_manual(name="Function",values=c(23,21,22))+
+  guides(fill = guide_legend(override.aes=list(shape=21)))+
+  scale_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none')+
+  scale_fill_manual(name="Predicted\nPathway",values=realpal)+
+  scale_edge_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none') +
+  coord_cartesian(clip = 'off')+
+  theme_cowplot(12)+
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_blank(),
+        # legend.position = c(0.735,0.2),
+        legend.text = element_text(size=10),
+        # legend.box = "horizontal",
+        legend.title = element_text(size=14))+
+  NULL
+# ballsy2
 
 funs.dt<-fread("data_in/binding_aff.csv")
 plotsy<-ggplot(funs.dt[gene!="VC2387"],
@@ -727,9 +886,10 @@ plotsy<-ggplot(funs.dt[gene!="VC2387"],
   geom_errorbar(aes(ymin=binding-sdev,ymax=binding+sdev),position = position_dodge(.9),width=.2)+
   scale_y_continuous(name="Mean Binding Affinity",expand=c(0,0),limits=c(0,5))+
   scale_x_discrete(expand=c(0,0))+
-  scale_fill_manual(values=c("blue1","salmon"),name="Tx Factor")+
+  scale_fill_manual(values=c("blue1","salmon"),name="Transcription\nFactor")+
   theme_cowplot(12)+
-  theme(axis.text.y = element_blank(),
+  theme(
+    axis.text.y = element_blank(),
         axis.title.y = element_blank(),
         axis.ticks.y = element_blank(),
         plot.margin=margin(1,0.5,0.5,0.5,"cm"))+
@@ -737,15 +897,22 @@ plotsy<-ggplot(funs.dt[gene!="VC2387"],
 
 save_plot("Figures/Fig3.pdf",
           plot_grid(ballsy,
-                    plotsy,
+                    plot_grid(
+                      NULL,
+                      plotsy, 
+                      NULL,
+                      rel_widths = c(0.1,0.8,0.1),
+                      nrow = 1),
                     nrow=2,
                     labels=c("A","B"), 
                     rel_heights=c(0.7,0.3),
-                    hjust=0,
-                    vjust=1.25,
-                    align="vh",
-                    axis = "l"),
-          base_height = 7.5,base_aspect_ratio=1.3)
+                    rel_widths = c(1,0.8)
+                    # hjust=0,
+                    # vjust=1.25,
+                    # align="vh",
+                    # axis = "l"
+                    ),
+          base_height = 6,base_aspect_ratio=1.8)
 ```
 
 # Figure 2
@@ -757,12 +924,16 @@ save_plot("Figures/Fig3.pdf",
 # mediumpurple3=biofilm
 # skyblue3=virulence
 # lightyellow=T6SS
+# brown = competence
+
+lo <- "kk"
 faces<-c(
   # "darkslateblue",
          "salmon",
          "grey60",
          "midnightblue",
-          "mediumpurple3",
+         "mediumpurple3",
+         "brown",
          # "lightyellow",
   NULL
   )
@@ -777,20 +948,29 @@ exclude<-c("VCt090",
            "VC1297"
            )
 
-facetted<-in_g%>%
+facetted <-
+  in_g%>%
   activate(edges)%>%
   activate(nodes)%>%
   filter(dynamicColors%in%faces &
            !(name %in% exclude))%>%
-  mutate(facetted_labs=if_else(dynamicColors=="mediumpurple3",
-                               des2,
-                               ""))%>%
+  mutate(facetted_labs=
+           case_when(dynamicColors == "mediumpurple3" ~ des2,
+                     dynamicColors == "brown" &
+                       annotation == "Competence" ~ des2,
+                     TRUE ~ "")) %>%
   activate(edges)%>%
+    mutate(edge_weights = case_when(condition == "Noperon" ~ 0.1,
+                                    condition == "Operon" ~ 0.1,
+                                    TRUE ~ 0.1)) %>%
+           # edge_weights = if_else(dynamicColors != "brown",
+           #                        1,
+           #                        edge_weights)) %>%
   filter(abs(weight)>=0.10)
 
 connects<-facetted%>%
   as_tibble()%>%
-  select(to,from)%>%
+  dplyr::select(to,from)%>%
   unlist()%>%
   unique()
 
@@ -799,14 +979,33 @@ facetted<-facetted%>%
   dplyr::slice(connects)
 
 
-aval=0.05
 sss=2.25
 
-facet_func<-function(gene_filt,ly){
-  
-  ggraph(facetted%>%filter(dynamicColors%in%gene_filt),layout = ly) +
-  geom_edge_link(colour="grey50",
-                 alpha=aval) +
+facet_func <- function(gene_filt,ly){
+  if(gene_filt %in% c("salmon",
+                      "midnightblue")){
+    aval1 = 0.02
+    aval2 = 0.06
+  } else if(gene_filt %in% c(
+          "mediumpurple3",
+          "grey60")){
+    aval1 = 0.04
+    aval2 = 0.1
+  } else {
+    aval1 = 0.008
+    aval2 = 0.1
+  }
+  # } else if(gene_filt == ){
+  #   aval = 0.05
+  # }
+  ggraph(facetted%>%filter(dynamicColors %in% gene_filt),layout = ly) +
+  geom_edge_link(
+    # colour="grey50",
+    aes(colour = condition),
+    alpha = aval1)+
+  scale_edge_colour_manual(name="Predicted\nPathway",
+                           values=realpal,guide = 'none') +
+  # scale_edge_alpha(range = c(aval1, aval2))+
   geom_node_point(aes(shape=hypno2,fill=as.factor(annotation),colour=as.factor(annotation)),size=sss)+
   geom_node_text(aes(label=facetted_labs),size=2.75,repel=T)+
   scale_shape_manual(name="Function",values=c(23,21,22))+
@@ -820,30 +1019,43 @@ facet_func<-function(gene_filt,ly){
         axis.ticks = element_blank(),
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
-        legend.position = "none")
+        legend.position = "none",
+        strip.background = element_blank(),
+        panel.border = element_blank(),
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=14))
 }
 
-trna <- facet_func("salmon","lgl")
-rbs <- facet_func("midnightblue","lgl")
-aa_synth <- facet_func("grey60","lgl")
-biofilm <- facet_func("mediumpurple3","lgl")
+trna <- facet_func("salmon",lo)
+rbs <- facet_func("midnightblue",lo)
+aa_synth <- facet_func("grey60",lo)
+biofilm <- facet_func("mediumpurple3",lo)
+competence <- facet_func("brown",lo)
 
-legz <- ggraph(facetted%>%filter(!duplicated(annotation) | !duplicated(hypno2)),layout = "lgl") +
-  geom_edge_link(colour="grey50",
-                 alpha=aval) +
+legz <- ggraph(facetted%>%filter(!duplicated(annotation) | !duplicated(hypno2)),layout = lo) +
+  geom_edge_link(
+    colour="grey50",
+    # aes(colour = condition),
+    alpha=aval) +
+  # scale_edge_colour_manual(name="Predicted\nPathway",values=realpal) +
   geom_node_point(aes(shape=hypno2,fill=as.factor(annotation),colour=as.factor(annotation)),size=sss)+
   geom_node_text(aes(label=facetted_labs),size=2.75,repel=T)+
   scale_shape_manual(name="Function",values=c(23,21,22))+
   scale_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none')+
   scale_fill_manual(name="Predicted\nPathway",values=realpal)+
   guides(fill = guide_legend(override.aes=list(shape=21)))+
+  theme_cowplot(12)+
   theme(axis.line = element_blank(),
         axis.title = element_blank(),
         axis.text = element_blank(),
         axis.ticks = element_blank(),
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
-        NULL)
+        # legend.position = "none",
+        strip.background = element_blank(),
+        panel.border = element_blank(),
+        legend.text = element_text(size=10),
+        legend.title = element_text(size=14))
 
 legz <- get_legend(legz)
   
@@ -851,18 +1063,34 @@ legz <- get_legend(legz)
 save_plot("Figures/Fig2.pdf",
           plot_grid(
             plot_grid(
+            plot_grid(
               trna,rbs,
               aa_synth,
               biofilm,
               nrow=2,
-              labels = c("A tRNA Transcripts","B Ribosome Related","C Amino Acid Synthesis","D Biofilm"),
-              scale=0.9, 
+              labels = c("A tRNA Transcripts",
+                         "B Ribosome Related",
+                         "C Amino Acid Synthesis",
+                         "D Biofilm"),
+              scale=0.875,
+              hjust = 0),
+            competence,
+            labels = c("","E Competence"),
+            nrow = 2,
+            rel_heights = c(0.66, 0.34),
+                         scale= c(1,0.875),
               hjust = 0),
             legz,
             ncol=2,
-            rel_widths=c(0.85,0.15)),
+            rel_widths=c(0.8,0.20)),
           base_height = 6,
-          base_aspect_ratio=1.5)
+          base_aspect_ratio=1.4)
+
+# save_plot("Figures/comp_test.pdf",
+#           competence)
+# 
+# save_plot("Figures/trna_test.pdf",
+#           trna)
 ```
 
 # Figure 4 RPOS
@@ -956,4 +1184,431 @@ save_plot("Figures/Fig4.pdf",plot_grid(grobTree(venn.plot),
                                        rpos_plot,labels="AUTO", nrow = 1,rel_widths = c(0.65,0.35)),base_height = 8,base_aspect_ratio = 1.6)
 ```
 
+```{r supplementary_pies}
 
+special_cols <- 
+  data.table(dynamicColors =
+               c("darkslatelue",
+                 "salmon",
+                 "grey60",
+                 "midnightblue",
+                 "mediumpurple3",
+                 "skyblue3",
+                 "lightyellow",
+                 "brown",
+                 "Full Network"),
+             facet_levs = 
+               c("rRNA",
+                 "tRNA",
+                 "AA synth.",
+                 "Ribosomal",
+                 "Biofilm",
+                 "Virulence",
+                 "T6SS",
+                 "Competence",
+                 "Full Network"))
+
+pie_summary <- 
+  node_df %>%
+  group_by(dynamicColors,hypno2) %>%
+  summarize(summed = n()) 
+
+pie_all <- pie_summary %>%
+  group_by(hypno2) %>%
+  summarize(summed = sum(summed),
+            dynamicColors = "Full Network")
+
+pie_summary <- bind_rows(pie_summary,
+                         pie_all) %>%
+  group_by(dynamicColors) %>%
+  mutate(perc = summed / sum(summed),
+         totes = sum(summed)) %>%
+  ungroup()%>%
+  left_join(special_cols) %>%
+  mutate(
+    dynamicColors = fct_reorder(dynamicColors,
+                                     totes),
+    indexer = as.numeric(dynamicColors),
+         y2 = if_else(perc == 1, 1.1, NA_real_),
+         w2 = if_else(perc == 1, 
+                      log10(totes)*0.963, NA_real_),
+         texter = if_else(hypno2 == "Known",
+                          paste0(totes," Genes"),
+                          NA_character_),
+    outline = if_else(is.na(facet_levs),
+                            "light",
+                            "dark"),
+    facet_levs =
+      if_else(is.na(facet_levs),
+              paste0("Net ",indexer, "<br>",totes," Genes"),
+              paste0(facet_levs, "<br>",totes," Genes")),
+    totes = if_else(totes > 177, 177, as.numeric(totes))) %>%
+      mutate(
+        facet_levs = as_factor(facet_levs),
+        facet_levs = fct_reorder(facet_levs, indexer * -1))
+
+
+
+supp_pie <-
+  ggplot(pie_summary,
+       aes(x  = log10(totes)/2, y = perc, 
+           fill = hypno2, width = log10(totes))) +
+  geom_col(position = "fill", aes(color = hypno2),
+           show.legend = FALSE) +
+  coord_polar( theta = "y") +
+  geom_col(data=pie_summary,
+           position = "fill",
+       aes(x  = log10(totes)/2, y = y2, 
+           fill = hypno2, width = w2)) +
+  facet_wrap(~ facet_levs, ncol = 10) + 
+  scale_colour_manual(values = c("black","black","black")) +
+  theme_cowplot(12) +
+  scale_fill_manual(values = pieslices,
+                    breaks = c("Unknown",
+                               "Important\nUnknown",
+                               "Known"),
+                    labels = c("Unknown ",
+                               "Important Unknown ",
+                               "Known "))+
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        legend.justification = "center",
+        text = element_text(size = 14),
+        legend.text = element_text(size = 16),
+        strip.background = element_blank(),
+        strip.text = element_textbox_highlight(
+          size = 11,
+          color = "white", fill = "aquamarine4", box.color = "black",
+          halign = 0.5, linetype = 1, r = unit(5, "pt"), width = unit(1, "npc"),
+          padding = margin(2, 0, 1, 0), margin = margin(3, 3, 3, 3),
+          hi.labels = pie_summary %>%
+            filter(dynamicColors %in% special_cols$dynamicColors&
+                     !grepl("Full Network",
+                            dynamicColors)) %>%
+            select(facet_levs) %>%
+            unlist(),
+          hi.fill = "tan1", hi.box.col = "black", hi.col = "black")
+  )
+
+save_plot("Figures/Supp_pie.pdf",
+          supp_pie,
+          base_height = 8.5)
+
+
+```
+
+```{r edge_pie}
+edge_pie_df <- in_g %>%
+  activate(edges) %>%
+  filter(c1 == c2) %>%
+  as_tibble() %>%
+  group_by(condition, c1)%>%
+  summarize(n_edges = n())
+
+edge_all <- edge_pie_df %>%
+  group_by(condition) %>%
+  summarize(n_edges = sum(n_edges),
+            c1 = "Full Network")  
+
+edge_pie_df <- bind_rows(edge_pie_df,
+                         edge_all) %>%
+  left_join(pie_summary %>%
+              select(dynamicColors, 
+                     facet_levs,
+                     y2, 
+                     w2,
+                     outline,
+                     totes) %>%
+              unique(),
+            by = c("c1" = "dynamicColors")) %>%
+  ungroup() %>%
+  group_by(c1) %>%
+  mutate(total = sum(n_edges)) %>%
+  ungroup() %>%
+  mutate(edge_rat = n_edges/total,
+         y2 = if_else(edge_rat == 1, 1.1, NA_real_),
+         w2 = if_else(edge_rat == 1, 
+                      log10(total)*0.963, NA_real_))
+
+edge_pie <-
+  ggplot(edge_pie_df,
+       aes(x  = log10(totes)/2, y = edge_rat, 
+           fill = condition, width = log10(totes))) +
+  geom_col() +
+  coord_polar( theta = "y") +
+  facet_wrap(~ facet_levs, ncol = 10) + 
+  theme_cowplot(12) +
+  scale_fill_manual(values = pieslices,
+                    breaks = c("Operon",
+                               "Noperon",
+                               "Unclear2"),
+                    labels = c("Operon ",
+                               "Not Operon ",
+                               "Unclear "))+
+  theme(axis.line = element_blank(),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        legend.title = element_blank(),
+        legend.position = "bottom",
+        legend.justification = "center",
+        text = element_text(size = 14),
+        legend.text = element_text(size = 16),
+        strip.background = element_blank(),
+        strip.text = element_textbox_highlight(
+          size = 11,
+          color = "white", fill = "aquamarine4", box.color = "black",
+          halign = 0.5, linetype = 1, r = unit(5, "pt"), width = unit(1, "npc"),
+          padding = margin(2, 0, 1, 0), margin = margin(3, 3, 3, 3),
+          hi.labels = pie_summary %>%
+            filter(dynamicColors %in% special_cols$dynamicColors&
+                     !grepl("Full Network",
+                            dynamicColors)) %>%
+            select(facet_levs) %>%
+            unlist(),
+          hi.fill = "tan1", hi.box.col = "black", hi.col = "black")
+  )
+
+save_plot("Figures/Supp_edge.pdf",
+          edge_pie,
+          base_height = 8.5)
+
+```
+
+```{r competence} 
+
+#brown = competence
+
+# dont_connect<-c("VC1329",
+#                 "VCA0951",
+#                 "VC1449",
+#                 "VC1450")
+
+# Notes:
+# Renames
+# VC1722 to tfoy
+# VC1913 to lapa
+
+ggg_brown <- create_layout(in_g%>%
+                     activate(edges)%>%
+                     filter(abs(weight)>=0.1)%>%
+                     activate(nodes)%>%
+                     filter(dynamicColors=="brown")%>%
+                     mutate(facetted_labs=if_else(annotation == "Competence",
+                                                  des2,
+                               "")), layout = "lgl")
+
+# fwrite(in_g%>%
+#          activate(edges)%>%
+#          filter(abs(weight)>=0.1)%>%
+#          activate(nodes)%>%
+#          filter(dynamicColors=="brown")%>%
+#          select(name, des2, dynamicColors,annotation,
+#                 GO_M,GO_B,GO_C) %>%
+#          as.data.table(),
+#        "data_in/temp_brown.csv")
+aval=0.01
+sss=4.5
+
+ballsy_brown <- ggraph(ggg_brown) +
+  geom_edge_link(
+    alpha=aval) +
+  geom_node_point(aes(fill=as.factor(annotation),
+                      # colour=as.factor(annotation),
+                      shape=hypno2),size=sss) +
+  # geom_node_point(aes(shape=hypno2), fill = "grey90",size=sss) +
+  # geom_node_text(aes(label=des2),size=3.5,repel=T)+
+  scale_shape_manual(name="Function",values=c(23,21,22))+
+  guides(fill = guide_legend(override.aes=list(shape=21)))+
+  # scale_colour_manual(name="Predicted\nPathway",values=realdark,guide = 'none')+
+  scale_fill_manual(name="Predicted\nPathway",values=realpal)+
+  coord_cartesian(clip = 'off')+
+  theme_cowplot(12)+
+  theme(axis.line = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_blank(),
+        # legend.position = c(0.735,0.2),
+        legend.text = element_text(size=10),
+        # legend.box = "horizontal",
+        legend.title = element_text(size=14))+
+  NULL
+# ballsy_brown
+
+save_plot("Figures/Fig_competence_named.pdf",
+          ballsy_brown+
+            geom_node_text(aes(label=facetted_labs),size=4,repel=T),
+          base_height = 7.5,base_aspect_ratio=1.7)
+
+save_plot("Figures/Fig_competence.pdf",
+          ballsy_brown,
+          base_height = 7.5,base_aspect_ratio=1.7)
+
+
+```
+
+### GO
+```{r GO}
+
+get_genelist <- 
+  function(df, column_name){
+    # if(column_name == "KEGG_PATHWAY"){
+    #   g_sym = ","
+    # } else {
+      g_sym = ";"
+    # }
+    column_name <- sym(column_name)
+    
+    
+    GL <- df %>%
+    select(name,
+           dynamicColors,
+           !!column_name) %>%
+    mutate(GO_col = as.list(str_split(!!column_name, g_sym))) %>%
+    unnest(cols = c(GO_col)) %>%
+      filter(!is.na(GO_col) &
+               GO_col != "") %>%
+    select(name,
+           dynamicColors,
+           GO_col)
+    
+  }
+
+get_enriched <-
+  function(dc, df, Domain) {
+    en_res <-
+      enricher(gene = df %>%
+           filter(dynamicColors == dc) %>%
+           select(gene = name) %>%
+           unlist(),
+         TERM2GENE = df %>% select(
+           term = GO_col,
+           gene = name)
+           ) %>%
+      as_tibble() %>%
+      mutate(dynamicColors = dc,
+             Domain = Domain)
+  }
+
+
+GO_M <- get_genelist(node_df, "GO_M")
+GO_C <- get_genelist(node_df, "GO_C")
+GO_B <- get_genelist(node_df, "GO_B")
+KEGG <- get_genelist(node_df, "KEGG_PATHWAY")
+
+net_colors <- node_df$dynamicColors %>%
+  unique() %>%
+  as.character() %>%
+  unlist()
+
+GO_df <-
+  bind_rows(
+    lapply(net_colors, 
+         FUN = get_enriched,
+         df = GO_M,
+         Domain = "Molecular Function"),
+    lapply(net_colors, 
+         FUN = get_enriched,
+         df = GO_C,
+         Domain = "Cell Component"),
+    lapply(net_colors, 
+         FUN = get_enriched,
+         df = GO_B,
+         Domain = "Biological Process"),
+    lapply(net_colors, 
+         FUN = get_enriched,
+         df = KEGG,
+         Domain = "KEGG")
+    ) %>%
+  mutate(full_counts =
+           gsub(".*\\/", "", GeneRatio) %>%
+           as.numeric(),
+         ratio = Count / full_counts,
+         GO_Term = ID,
+         Bg_Counts = gsub("\\/.*", "", BgRatio) %>%
+           as.numeric(),
+         Bg_Totals = gsub(".*\\/", "", BgRatio) %>%
+           as.numeric(),
+         BR = Bg_Counts/Bg_Totals,
+         qvalue = if_else(is.na(qvalue),0,
+                          qvalue)) %>%
+  filter(qvalue <= 0.05)
+
+analyzed_terms <- 
+  inner_join(GO_df,
+             special_cols) %>%
+  arrange(Domain,
+          desc(ID)) %>%
+  mutate(
+    Domain = fct_relevel(
+    as_factor(Domain),
+    "KEGG",
+    after = Inf),
+    ID_labs = paste0(as.character(ID), " "),
+    ID_labs = factor(ID_labs, 
+                        levels = unique(ID_labs)),
+    GO_Term_num = as.integer(ID_labs))
+
+analyzed_terms <- 
+  analyzed_terms %>%
+  left_join(data.frame(x = 4,
+                       GO_Term_num = seq(1,
+                               nrow(specials)-1,
+                               2)))
+
+go_plot <-
+  ggplot(analyzed_terms, aes(y = ID_labs, x = facet_levs, fill = qvalue )) +
+  geom_tile(aes(y = ID_labs, x = x), 
+            fill = "grey94", inherit.aes = F, width = 7, height = 1)+
+  geom_tile() +
+  scale_fill_gradient( low = "steelblue2",
+                       high = "royalblue4",
+                       na.value = "grey50",
+                       limits = c(0,0.05)) +
+  scale_x_discrete(expand = c(0,0),
+                   position = "top",
+                   name = "Sub Network\n")+
+  scale_y_discrete(expand = c(0,0))+
+  guides(fill = 
+           guide_colourbar(title.position="top",
+                           title.hjust = 0.5))+
+  facet_grid( Domain ~ . ,
+               scales = "free_y",
+               space = "free_y")+
+  theme_cowplot(12) +
+  theme(panel.border = element_rect(colour = "black",
+                                    size = 1),
+        axis.line = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "bottom",
+        legend.justification = "center",
+        legend.key.width = unit(40, "points"),
+        text = element_text(size = 13),
+        axis.text = element_text(size = 13),
+        # axis.text.x = element_text(size = 14),
+        strip.background = element_blank(),
+        strip.text = element_text(colour = "black"),
+        axis.title = element_blank()
+        )
+
+save_plot("Figures/Fig_GO.pdf",
+          go_plot,
+          base_height = 10,
+          base_aspect_ratio = 1.2)
+
+fwrite(GO_df %>% select(GO_Term,
+                          Domain,
+                          ratio,
+                          Count,
+                          full_counts,
+                          BR),
+       "Paper/Tables/S2.csv")
+```
